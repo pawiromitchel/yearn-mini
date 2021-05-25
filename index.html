@@ -18,45 +18,31 @@
     const findToken = id => tokens.find(token => token.id === id);
     const loadChunkedData = async (contract, addresses, chunkSize, method, args) => {
       const chunkArray = (input, size) => input.reduce((arr, item, idx) => idx % size === 0 ? [...arr, [item]]: [...arr.slice(0, -1), [...arr.slice(-1)[0], item]], []);      
-      const chunks = await Promise.all(chunkArray(addresses, chunkSize).map(vaultAddressesChunk => args ? contract.methods[method](args, vaultAddressesChunk).call() : contract.methods[method](vaultAddressesChunk).call()));
-      return chunks.reduceRight((previousArray, currentArray) => previousArray.concat(currentArray));
+      return (await Promise.all(chunkArray(addresses, chunkSize).map(vaultAddressesChunk => args ? contract.methods[method](args, vaultAddressesChunk).call() : contract.methods[method](vaultAddressesChunk).call()))).reduceRight((previousArray, currentArray) => previousArray.concat(currentArray));
     }
-    const currencyTransform = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2}).format(val);
+    const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2}).format(val);
     const formatTokenAmount = (amount) => new Intl.NumberFormat("en-US", { minimumFractionDigits: 4 }).format(amount);
     const loadData = async () => {
       assetsAddressesPromise = registryAdapterContract.methods.assetsAddresses().call();
       assetsTokensAddressesPromise = registryAdapterContract.methods.assetsTokensAddresses().call();
       const [assetsAddresses, assetsTokensAddresses] = await Promise.all([assetsAddressesPromise, assetsTokensAddressesPromise]);
-      [assetsStatic, assetsDynamic, assestsPositionsOf, tokensMetadata, tokensBalances] = await Promise.all([
+      [assetsStatic, assetsDynamic, assestsPositionsOf, tokensBalances, tokensMetadata] = await Promise.all([
         loadChunkedData(registryAdapterContract, assetsAddresses, 40, 'assetsStatic'),
         loadChunkedData(registryAdapterContract, assetsAddresses, 4, 'assetsDynamic'),
         loadChunkedData(registryAdapterContract, assetsAddresses, 3, 'assetsPositionsOf', account),
-        balancesHelperContract.methods.tokensMetadata(assetsTokensAddresses).call(),
         loadChunkedData(balancesHelperContract, assetsTokensAddresses, 4, 'tokensBalances', account),
+        balancesHelperContract.methods.tokensMetadata(assetsTokensAddresses).call()
       ]);
       tokens = tokensMetadata.map((tokenMetadata) => Object.assign({}, tokenMetadata, tokensBalances.find(tokenBalance => tokenBalance.tokenId === tokenMetadata.id)));
       assets = assetsStatic.map((assetStatic) => Object.assign({}, assetStatic, assetsDynamic.find(assetDynamic => assetDynamic.id === assetStatic.id))).filter(asset => !asset.metadata.migrationAvailable);
       const walletEls = tokens.reduce((acc, token) => {
-        const tokenBalance = token.balanceUsdc;
-        if (tokenBalance > 0) acc += `<tr><td>${token.symbol}</td><td>${formatTokenAmount(token.balance / 10**token.decimals)}</td><td>${currencyTransform(token.balanceUsdc / 10**6)}</td><td><button onClick="deposit('${token.id}')">deposit</button></td></tr>`
+        if (token.balanceUsdc > 0) acc += `<tr><td>${token.symbol}</td><td>${formatTokenAmount(token.balance / 10**token.decimals)}</td><td>${formatCurrency(token.balanceUsdc / 10**6)}</td><td><button onClick="deposit('${token.id}')">deposit</button></td></tr>`
         return acc;
       }, []);
-      const positionsRows = assestsPositionsOf.reduce((acc, position) => {
-        acc += `<tr><td>${findToken(position.tokenId).symbol}</td><td>${formatTokenAmount(position.underlyingTokenBalance.amount / 10**findToken(position.tokenId).decimals)}</td><td>${currencyTransform(position.underlyingTokenBalance.amountUsdc / 10**6)}</td><td><button onClick="withdraw('${position.assetId}')">withdraw</button></td></tr>`
-        return acc;
-      }, '');
+      const positionsRows = assestsPositionsOf.reduce((acc, position) => acc += `<tr><td>${findToken(position.tokenId).symbol}</td><td>${formatTokenAmount(position.underlyingTokenBalance.amount / 10**findToken(position.tokenId).decimals)}</td><td>${formatCurrency(position.underlyingTokenBalance.amountUsdc / 10**6)}</td><td><button onClick="withdraw('${position.assetId}')">withdraw</button></td></tr>`, '');
       const positionsEls = `<h2>Your Deposits</h2><table><thead><th>Name</th><th>Tokens</th><th>Value</th><th></th></thead><tbody>${positionsRows}</tbody></table>`;
-      if (positionsRows) {
-        document.getElementById('deposits').setAttribute('style', 'display: inherit');
-      }
-      const assetsEls = assets.reduce((acc, asset) => {
-        acc += `<tr>
-          <td>${findToken(asset.tokenId).symbol}</td>
-          <td>${formatTokenAmount(asset.underlyingTokenBalance.amount / 10**findToken(asset.tokenId).decimals)}</td>
-          <td>${currencyTransform(asset.underlyingTokenBalance.amountUsdc / 10**6)}</td>
-          </tr>`
-        return acc;
-      }, '');
+      if (positionsRows) document.getElementById('deposits').setAttribute('style', 'display: inherit');
+      const assetsEls = assets.reduce((acc, asset) => acc += `<tr><td>${findToken(asset.tokenId).symbol}</td><td>${formatTokenAmount(asset.underlyingTokenBalance.amount / 10**findToken(asset.tokenId).decimals)}</td><td>${formatCurrency(asset.underlyingTokenBalance.amountUsdc / 10**6)}</td></tr>`, '');
       document.getElementById('walletRows').innerHTML = walletEls;
       document.getElementById('deposits').innerHTML = positionsEls;
       document.getElementById('assetsRows').innerHTML = assetsEls;
@@ -67,7 +53,6 @@
       const tokenContract = new web3.eth.Contract(vaultAbi, tokenId);
       const allowance = await tokenContract.methods.allowance(account, assetId).call();
       const token = findToken(tokenId);
-      const maxUint2561 = new BigNumber(2).pow(256).minus(1).toFixed(0);
       if (allowance === "0") {
         if(!confirm(`Allow "${findAssetByUnderlyingTokenId(tokenId).symbol}" to spend your "${token.symbol}" token?`)) return;
         const maxUint256 = new BigNumber(2).pow(256).minus(1).toFixed(0);
@@ -83,7 +68,8 @@
     const withdraw = async (assetId) => {
       const position = assestsPositionsOf.find(assetPosition => assetPosition.assetId === assetId);
       const vaultContract = new web3.eth.Contract(vaultAbi, assetId);
-      const amountStr = prompt(`Enter enter the percentage of your shares you with to withdraw (0-100)`);
+      const amountStr = prompt(`Enter enter the percentage of your shares you wish to withdraw (0-100)`);
+      if (!amountStr) return;
       const amount = new BigNumber(position.balance).times(amountStr / 100).toFixed(0);
       const gasLimit = await vaultContract.methods.withdraw(amount).estimateGas({ from: account });
       await vaultContract.methods.withdraw(amount).send({from: account,gas: gasLimit});
@@ -94,9 +80,7 @@
         window.web3 = new Web3(ethereum);
         ethereum.enable().then(() => {
           web3.eth.getAccounts().then((wallet) => {
-            if (wallet && wallet.length) {
-              account = wallet[0];
-            }
+            account = wallet[0];
             registryAdapterContract = new web3.eth.Contract(registryAdapterAbi, registryAdapterAddress);
             balancesHelperContract = new web3.eth.Contract(balancesHelperAbi, balancesHelperAddress);
             loadData();
@@ -105,14 +89,10 @@
       } else alert('No web3 support :(\r\n\r\nTry running this file using: python -m http.server 8080');
     });
     </script>
-    <div class="main">
     <div class="header">yearn-mini</div>
       <h2>Your Wallet</h2>
       <div class="wallet"><table><thead><th>Name</th><th>Tokens</th><th>Value</th><th></th></thead><tbody id="walletRows"></tbody></table></div>
-      <div id="deposits">
-        <h2>Your Deposits</h2>
-        <table><thead><th>Name</th><th>Tokens</th><th>Value</th><th></th></thead><tbody id="positionsRows"></tbody></table>
-      </div>
+      <div id="deposits"></div>
       <h2>All Vaults</h2>
       <table><thead><th>Name</th><th>Tokens</th><th>Value</th><th></th></thead><tbody id="assetsRows"></tbody></table>
     </div>
